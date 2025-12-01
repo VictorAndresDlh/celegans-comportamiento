@@ -34,6 +34,15 @@ def analyze_ml_screening():
 
     final_df = pd.concat(all_results, ignore_index=True)
 
+    # Handle both old (accuracy) and new (accuracy_mean) column names
+    if 'accuracy_mean' in final_df.columns:
+        acc_col = 'accuracy_mean'
+        acc_std_col = 'accuracy_std'
+        has_std = True
+    else:
+        acc_col = 'accuracy'
+        has_std = False
+
     # Add performance categories
     def categorize_performance(accuracy):
         if accuracy >= 0.9:
@@ -45,20 +54,31 @@ def analyze_ml_screening():
         else:
             return 'Poor (<60%)'
 
-    final_df['performance'] = final_df['accuracy'].apply(categorize_performance)
+    final_df['performance'] = final_df[acc_col].apply(categorize_performance)
 
     # Sort by performance
-    final_df = final_df.sort_values(['accuracy'], ascending=False)
+    final_df = final_df.sort_values([acc_col], ascending=False)
 
     # Display complete results
-    display_df = final_df[['strain', 'treatment', 'accuracy', 'f1_control', 'f1_treatment', 'performance']].copy()
-    display_df.rename(columns={
-        'accuracy': 'Accuracy',
+    display_cols = ['strain', 'treatment', acc_col]
+    if has_std:
+        display_cols.append(acc_std_col)
+    display_cols.extend(['f1_control', 'f1_treatment', 'performance'])
+    display_df = final_df[display_cols].copy()
+
+    rename_dict = {
+        acc_col: 'Accuracy (mean)' if has_std else 'Accuracy',
         'f1_control': 'F1 (Control)',
         'f1_treatment': 'F1 (Treatment)',
         'performance': 'Performance Category'
-    }, inplace=True)
-    display_df['Accuracy'] = display_df['Accuracy'].map(lambda x: f"{x:.1%}")
+    }
+    if has_std:
+        rename_dict[acc_std_col] = 'Accuracy (std)'
+    display_df.rename(columns=rename_dict, inplace=True)
+
+    display_df['Accuracy (mean)' if has_std else 'Accuracy'] = display_df['Accuracy (mean)' if has_std else 'Accuracy'].map(lambda x: f"{x:.1%}")
+    if has_std:
+        display_df['Accuracy (std)'] = display_df['Accuracy (std)'].map(lambda x: f"{x:.3f}")
 
     print("### Complete Classification Results\n")
     print(display_df.to_markdown(index=False))
@@ -79,9 +99,9 @@ def analyze_ml_screening():
     for strain in final_df['strain'].unique():
         strain_data = final_df[final_df['strain'] == strain]
         total_strain_tests = len(strain_data)
-        avg_accuracy = strain_data['accuracy'].mean()
-        best_accuracy = strain_data['accuracy'].max()
-        best_treatment = strain_data.loc[strain_data['accuracy'].idxmax(), 'treatment']
+        avg_accuracy = strain_data[acc_col].mean()
+        best_accuracy = strain_data[acc_col].max()
+        best_treatment = strain_data.loc[strain_data[acc_col].idxmax(), 'treatment']
 
         print(f"\n**{strain}:**")
         print(f"- Tests: {total_strain_tests}")
@@ -95,7 +115,7 @@ def analyze_ml_screening():
 
     # Treatment effectiveness across all strains
     treatment_summary = final_df.groupby('treatment').agg({
-        'accuracy': ['count', 'mean', 'max', 'std'],
+        acc_col: ['count', 'mean', 'max', 'std'],
         'strain': lambda x: list(x)
     }).round(3)
     treatment_summary.columns = ['Tests', 'Avg Accuracy', 'Best Accuracy', 'Std Dev', 'Strains']
@@ -109,17 +129,20 @@ def analyze_ml_screening():
     print(treatment_summary[['treatment', 'Tests', 'Avg Accuracy', 'Best Accuracy', 'Std Dev']].to_markdown(index=False))
 
     # Highlight exceptional performers (>85%)
-    exceptional_performers = final_df[final_df['accuracy'] > 0.85]
+    exceptional_performers = final_df[final_df[acc_col] > 0.85]
     if not exceptional_performers.empty:
         print(f"\n### Exceptional Performers (>85% Accuracy)\n")
         print("These strain/treatment combinations show exceptionally strong and distinctive behavioral phenotypes:\n")
         for _, row in exceptional_performers.iterrows():
             f1_balance = abs(row['f1_control'] - row['f1_treatment'])
             balance_desc = "balanced classification" if f1_balance < 0.3 else "control-dominant" if row['f1_control'] > row['f1_treatment'] else "treatment-dominant"
-            print(f"- **{row['strain']} + {row['treatment']}:** {row['accuracy']:.1%} accuracy ({balance_desc})")
+            acc_str = f"{row[acc_col]:.1%}"
+            if has_std:
+                acc_str += f" ± {row[acc_std_col]:.3f}"
+            print(f"- **{row['strain']} + {row['treatment']}:** {acc_str} accuracy ({balance_desc})")
 
     # Analysis of poor performers for insights
-    poor_performers = final_df[final_df['accuracy'] < 0.55]
+    poor_performers = final_df[final_df[acc_col] < 0.55]
     if not poor_performers.empty:
         print(f"\n### Analysis of Poor Classification Performance (<55%)\n")
         print("These combinations show limited phenotypic distinctiveness, suggesting:")
@@ -142,10 +165,10 @@ def analyze_ml_screening():
         for treatment in multi_strain_treatments['treatment'].unique():
             treatment_data = final_df[final_df['treatment'] == treatment]
 
-            avg_accuracy = treatment_data['accuracy'].mean()
-            std_accuracy = treatment_data['accuracy'].std()
-            min_accuracy = treatment_data['accuracy'].min()
-            max_accuracy = treatment_data['accuracy'].max()
+            avg_accuracy = treatment_data[acc_col].mean()
+            std_accuracy = treatment_data[acc_col].std()
+            min_accuracy = treatment_data[acc_col].min()
+            max_accuracy = treatment_data[acc_col].max()
             strain_count = len(treatment_data)
 
             # Consistency score: high average with low variability

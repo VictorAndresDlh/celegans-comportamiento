@@ -39,16 +39,26 @@ def analyze_levy_flight():
     )
 
     # Sort by search type and p-value for better readability
-    display_df = final_df[['strain', 'treatment', 'alpha', 'p_value', 'loglikelihood_ratio', 'search_type']].copy()
+    display_cols = ['strain', 'treatment', 'alpha', 'alpha_ci_lower', 'alpha_ci_upper',
+                    'p_value', 'loglikelihood_ratio', 'percent_levy_worms', 'search_type']
+    # Only include columns that exist
+    display_cols = [col for col in display_cols if col in final_df.columns]
+    display_df = final_df[display_cols].copy()
     display_df = display_df.sort_values(['search_type', 'p_value'])
 
     # Rename columns for clarity
-    display_df.rename(columns={
+    rename_dict = {
         'alpha': 'α (exponent)',
+        'alpha_ci_lower': 'α CI Lower',
+        'alpha_ci_upper': 'α CI Upper',
         'p_value': 'p-value',
         'loglikelihood_ratio': 'R (Log-Likelihood Ratio)',
+        'percent_levy_worms': '% Worms Lévy-like',
         'search_type': 'Search Pattern'
-    }, inplace=True)
+    }
+    # Only rename columns that exist
+    rename_dict = {k: v for k, v in rename_dict.items() if k in display_df.columns}
+    display_df.rename(columns=rename_dict, inplace=True)
 
     print("### Complete Results Table\n")
     print(display_df.to_markdown(index=False))
@@ -129,6 +139,30 @@ def analyze_levy_flight():
         if promising['loglikelihood_ratio'] > -2:  # Show if not too negative
             print(f"- Most promising non-significant: {promising['treatment']} (R={promising['loglikelihood_ratio']:.3f})")
         print()
+
+    # FDR correction results
+    fdr_path = Path('results/Analysis/Levy_Flight/levy_flight_fdr_correction.csv')
+    if fdr_path.exists():
+        print(f"\n### FDR Correction Results (Benjamini-Hochberg)\n")
+        fdr_df = pd.read_csv(fdr_path)
+
+        n_sig_uncorrected = (fdr_df['p_value'] < 0.05).sum()
+        n_sig_corrected = fdr_df['significant_FDR'].sum()
+        false_positives_eliminated = n_sig_uncorrected - n_sig_corrected
+
+        print(f"**Multiple comparison correction applied across {len(fdr_df)} total tests:**")
+        print(f"- Significant before correction (p < 0.05): {n_sig_uncorrected}")
+        print(f"- Significant after FDR correction (q < 0.05): {n_sig_corrected}")
+        print(f"- Likely false positives eliminated: {false_positives_eliminated}\n")
+
+        if n_sig_corrected > 0:
+            print(f"**FDR-corrected significant results:**\n")
+            sig_fdr = fdr_df[fdr_df['significant_FDR']].sort_values('q_value_BH')
+            for _, row in sig_fdr.iterrows():
+                print(f"- **{row['strain']} + {row['treatment']}:** q={row['q_value_BH']:.3f}, R={row['R']:.3f}")
+        else:
+            print("**No results survived FDR correction.**")
+            print("This suggests that all significant p-values were likely false positives due to multiple testing.")
 
 if __name__ == '__main__':
     analyze_levy_flight()

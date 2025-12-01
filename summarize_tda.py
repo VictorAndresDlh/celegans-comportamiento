@@ -1,5 +1,23 @@
-import pandas as pd
+import sys
 from pathlib import Path
+from contextlib import redirect_stdout
+
+import pandas as pd
+
+
+class Tee:
+    """Simple tee stream to write simultaneously to multiple streams."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+
+    def flush(self):
+        for s in self.streams:
+            s.flush()
 
 def analyze_tda():
     """
@@ -10,7 +28,7 @@ def analyze_tda():
     strains = [p.name for p in base_analysis_dir.iterdir() if p.is_dir()]
 
     print("## Comprehensive TDA (Topological Data Analysis) Analysis\n")
-    print("This analysis shows topological feature-based Random Forest classification results for ALL strain/treatment combinations.\n")
+    print("This analysis shows topological feature-based SVM classification results for ALL strain/treatment combinations.\n")
     print("**TDA Performance Categories:**")
     print("- **Excellent (>80%):** Very strong topological signature, highly distinguishable trajectory shape")
     print("- **Good (65-80%):** Clear topological phenotype, reliably distinguishable global trajectory patterns")
@@ -34,6 +52,15 @@ def analyze_tda():
         # Clean data: remove rows with nan treatments
         clean_df = final_df[final_df['treatment'].notna()].copy()
 
+        # Handle both old (accuracy) and new (accuracy_mean) column names
+        if 'accuracy_mean' in clean_df.columns:
+            acc_col = 'accuracy_mean'
+            acc_std_col = 'accuracy_std'
+            has_std = True
+        else:
+            acc_col = 'accuracy'
+            has_std = False
+
         # Add performance categories (TDA typically has lower accuracy than standard ML)
         def categorize_tda_performance(accuracy):
             if accuracy >= 0.8:
@@ -45,20 +72,31 @@ def analyze_tda():
             else:
                 return 'Poor (<55%)'
 
-        clean_df['performance'] = clean_df['accuracy'].apply(categorize_tda_performance)
+        clean_df['performance'] = clean_df[acc_col].apply(categorize_tda_performance)
 
         # Sort by performance
-        clean_df = clean_df.sort_values(['accuracy'], ascending=False)
+        clean_df = clean_df.sort_values([acc_col], ascending=False)
 
         # Display complete results
-        display_df = clean_df[['strain', 'treatment', 'accuracy', 'f1_control', 'f1_treatment', 'performance']].copy()
-        display_df.rename(columns={
-            'accuracy': 'Accuracy',
+        display_cols = ['strain', 'treatment', acc_col]
+        if has_std:
+            display_cols.append(acc_std_col)
+        display_cols.extend(['f1_control', 'f1_treatment', 'performance'])
+        display_df = clean_df[display_cols].copy()
+
+        rename_dict = {
+            acc_col: 'Accuracy (mean)' if has_std else 'Accuracy',
             'f1_control': 'F1 (Control)',
             'f1_treatment': 'F1 (Treatment)',
             'performance': 'TDA Performance Category'
-        }, inplace=True)
-        display_df['Accuracy'] = display_df['Accuracy'].map(lambda x: f"{x:.1%}")
+        }
+        if has_std:
+            rename_dict[acc_std_col] = 'Accuracy (std)'
+        display_df.rename(columns=rename_dict, inplace=True)
+
+        display_df['Accuracy (mean)' if has_std else 'Accuracy'] = display_df['Accuracy (mean)' if has_std else 'Accuracy'].map(lambda x: f"{x:.1%}")
+        if has_std:
+            display_df['Accuracy (std)'] = display_df['Accuracy (std)'].map(lambda x: f"{x:.3f}")
 
         print("### Complete TDA Classification Results\n")
         print(display_df.to_markdown(index=False))
@@ -75,7 +113,7 @@ def analyze_tda():
             print(f"- **{category}:** {count} cases ({percentage:.1f}%)")
 
         # Compare with random baseline (50% for binary classification)
-        above_random = len(clean_df[clean_df['accuracy'] > 0.5])
+        above_random = len(clean_df[clean_df[acc_col] > 0.5])
         print(f"- **Above random chance (>50%):** {above_random}/{total_tests} ({above_random/total_tests*100:.1f}%)")
 
         # Strain-wise performance breakdown
@@ -83,24 +121,45 @@ def analyze_tda():
         for strain in clean_df['strain'].unique():
             strain_data = clean_df[clean_df['strain'] == strain]
             total_strain_tests = len(strain_data)
-            avg_accuracy = strain_data['accuracy'].mean()
-            best_accuracy = strain_data['accuracy'].max()
-            best_treatment = strain_data.loc[strain_data['accuracy'].idxmax(), 'treatment']
+            avg_accuracy = strain_data[acc_col].mean()
+            best_accuracy = strain_data[acc_col].max()
+            best_treatment = strain_data.loc[strain_data[acc_col].idxmax(), 'treatment']
 
             print(f"\n**{strain}:**")
             print(f"- Tests: {total_strain_tests}")
             print(f"- Average TDA accuracy: {avg_accuracy:.1%}")
             print(f"- Best result: {best_accuracy:.1%} ({best_treatment})")
-            print(f"- Above random: {len(strain_data[strain_data['accuracy'] > 0.5])}/{total_strain_tests}")
+            print(f"- Above random: {len(strain_data[strain_data[acc_col] > 0.5])}/{total_strain_tests}")
 
             # Performance distribution for this strain
             strain_performance_counts = strain_data['performance'].value_counts()
             for perf_cat, count in strain_performance_counts.items():
                 print(f"- {perf_cat}: {count}")
 
+            # Report window lengths used for this strain (if available)
+            if 'window_length' in strain_data.columns:
+                unique_L = sorted(strain_data['window_length'].dropna().unique())
+                if len(unique_L) == 1:
+                    print(f"- Window length used (L): {unique_L[0]}")
+                elif len(unique_L) > 1:
+                    counts_L = strain_data['window_length'].value_counts().sort_index()
+                    breakdown = ", ".join(
+                        f"L={int(L)}: {count} tests"
+                        for L, count in counts_L.items()
+                    )
+                    print(f"- Window lengths used: {breakdown}")
+
+        # Global window-length usage (if available)
+        if 'window_length' in clean_df.columns:
+            print(f"\n### Window Length Selection Across All Strains")
+            L_counts = clean_df['window_length'].value_counts().sort_index()
+            for L, count in L_counts.items():
+                pct = count / total_tests * 100 if total_tests > 0 else 0
+                print(f"- **L={int(L)}:** {count} tests ({pct:.1f}%)")
+
         # Treatment effectiveness across all strains
         treatment_summary = clean_df.groupby('treatment').agg({
-            'accuracy': ['count', 'mean', 'max', 'std'],
+            acc_col: ['count', 'mean', 'max', 'std'],
             'strain': lambda x: list(x)
         }).round(3)
         treatment_summary.columns = ['Tests', 'Avg Accuracy', 'Best Accuracy', 'Std Dev', 'Strains']
@@ -118,9 +177,9 @@ def analyze_tda():
         for treatment in clean_df['treatment'].unique():
             treatment_data = clean_df[clean_df['treatment'] == treatment]
             if len(treatment_data) > 1:  # Multiple strains
-                avg_acc = treatment_data['accuracy'].mean()
-                std_acc = treatment_data['accuracy'].std()
-                min_acc = treatment_data['accuracy'].min()
+                avg_acc = treatment_data[acc_col].mean()
+                std_acc = treatment_data[acc_col].std()
+                min_acc = treatment_data[acc_col].min()
                 consistency_score = avg_acc - std_acc  # Penalize high variability
 
                 consistent_treatments.append({
@@ -140,14 +199,17 @@ def analyze_tda():
             print(consistency_df.to_markdown(index=False))
 
         # Topological signature interpretation
-        high_performers = clean_df[clean_df['accuracy'] > 0.65]
+        high_performers = clean_df[clean_df[acc_col] > 0.65]
         if not high_performers.empty:
             print(f"\n### Topological Signature Analysis")
             print(f"The following {len(high_performers)} strain/treatment combinations show strong topological signatures (>65% accuracy):")
             print(f"This suggests these treatments induce distinctive changes in the geometric/spatial patterns of worm trajectories.\n")
 
             for _, row in high_performers.iterrows():
-                print(f"- **{row['strain']} + {row['treatment']}:** {row['accuracy']:.1%} (Strong topological phenotype)")
+                acc_str = f"{row[acc_col]:.1%}"
+                if has_std:
+                    acc_str += f" ± {row[acc_std_col]:.3f}"
+                print(f"- **{row['strain']} + {row['treatment']}:** {acc_str} (Strong topological phenotype)")
 
         else:
             print(f"\n### Topological Signature Analysis")
@@ -159,4 +221,10 @@ def analyze_tda():
         print("No TDA analysis results found. Check if the methodology has completed.")
 
 if __name__ == '__main__':
-    analyze_tda()
+    # Save a copy of the summary to disk while still printing to the terminal
+    summaries_dir = Path('results/Analysis/Summaries')
+    summaries_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = summaries_dir / 'tda_summary.md'
+
+    with summary_path.open('w', encoding='utf-8') as f, redirect_stdout(Tee(sys.stdout, f)):
+        analyze_tda()

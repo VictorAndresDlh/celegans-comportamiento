@@ -1,392 +1,606 @@
-# Comparación Metodológica: Papers Originales vs. Implementación
+# Critical Methodology Comparison: Papers vs. Implementation
 
-## 1. Análisis de Vuelo de Lévy (Moy et al. 2015)
+## Purpose
 
-### 1.1 Qué hace el paper
+This document provides a **critical, detailed comparison** between published methodologies and their implementation in this repository. It identifies strengths, weaknesses, and deviations from source papers.
 
-Moy et al. (2015) desarrolla un método para distinguir entre estrategias de búsqueda Browniana y vuelo de Lévy en *C. elegans*:
-
-1. **Detección de eventos de giro**: Identificar puntos donde el cambio en dirección excede 40°
-2. **Cálculo de longitudes de paso**: Medir distancia euclidiana entre eventos de giro consecutivos
-3. **Ajuste de distribución de ley de potencias**: Usar máxima verosimilitud para estimar el exponente α y el valor mínimo xmin
-4. **Comparación de modelos**: Calcular el radio de log-verosimilitud (R) comparando power-law vs lognormal
-
-**Criterio de clasificación estadística**:
-- R > 0 y p < 0.05 indica patrón tipo Lévy
-- **No menciona correcciones por comparaciones múltiples**
-
-El exponente α caracteriza el tipo de búsqueda:
-- 1 < α < 3: rango de vuelo de Lévy
-- α ≈ 2: búsqueda óptima según teoría
-
-### 1.2 Qué datos usa el paper
-
-- Trayectorias de centroide de *C. elegans* individuales
-- **Muestreo temporal**: 1 Hz (Δt = 1 segundo) - crítico para evitar sobresampling
-- Duración mínima de 20 minutos de grabación
-- Experimentos en presencia y ausencia de alimento
-- Cepa N2 wild-type
-
-### 1.3 Qué hace nuestra implementación
-
-1. Calcula vectores de movimiento entre posiciones consecutivas
-2. Calcula ángulos de dirección del movimiento
-3. Detecta giros donde el cambio angular absoluto excede 40°
-4. Calcula longitudes de paso como distancias euclidianas entre puntos de giro
-5. Ajusta distribución power-law por máxima verosimilitud
-6. Compara power-law vs lognormal usando radio de log-verosimilitud
-7. Clasifica como "Lévy-like" si R > 0 y p < 0.05
-
-**Datos utilizados**:
-- Trayectorias de WMicrotracker SMART (muestreo nativo 1 Hz)
-- 7 cepas de *C. elegans*
-- Múltiples tratamientos cannabinoides
-
-### 1.4 Diferencias principales
-
-#### Alineamiento metodológico
-- ✅ Umbral de 40° idéntico al paper
-- ✅ Muestreo a 1 Hz coincide con especificación del paper
-- ✅ Método de ajuste por máxima verosimilitud
-- ✅ Comparación power-law vs lognormal con radio de log-verosimilitud
-- ✅ Criterio de significancia R > 0, p < 0.05
-
-#### Diferencias en aplicación
-- **Población**: Paper usa solo N2; implementación analiza 7 cepas
-- **Condiciones**: Paper compara presencia/ausencia de alimento; implementación evalúa cannabinoides
-- **Escala**: Implementación procesa múltiples cepas × tratamientos (7 × ~8 = ~56 pruebas estadísticas)
-
-#### Problema matemático identificado
-
-**Normalización de ángulos**: La implementación normaliza diferencias angulares a rango [-π, π] antes de tomar valor absoluto. Esto puede generar errores en transiciones que cruzan el límite ±180°.
-
-**Ejemplo del problema**: Un cambio de heading de 179° a -179° representa un cambio real de 2°, pero:
-- Diferencia cruda: -179° - 179° = -358°
-- Normalizada a [-π, π]: -358° → 2° (correcto)
-- Pero si se normaliza DESPUÉS de otras operaciones, puede computarse como 358°
-
-El paper no especifica explícitamente el procedimiento de normalización angular.
-
-#### Validación estadística
-
-El paper de Moy et al. **no menciona correcciones por comparaciones múltiples**. El análisis reportado compara 2-3 condiciones (food vs no food, diferentes genotipos).
-
-Nuestra implementación tampoco aplica correcciones. Con ~56 pruebas estadísticas (7 cepas × 8 tratamientos) y α=0.05 sin corrección, se esperarían ~2.8 clasificaciones "Lévy-like" por azar puro bajo la hipótesis nula.
+**Last Updated**: 2025-01-30
 
 ---
 
-## 2. Análisis Topológico de Datos - TDA (Thomas et al. 2021)
+## 1. Topological Data Analysis (TDA)
 
-### 2.1 Qué hace el paper
+### 1.1 Source Paper
 
-Thomas et al. (2021) aplica homología persistente para clasificar trayectorias conductuales:
+**Thomas, A., Bates, K., Elchesen, A., Hartsock, I., Lu, H., & Bubenik, P. (2021)**
+*Topological Data Analysis of C. elegans Locomotion and Behavior*
+Frontiers in Artificial Intelligence, 4:668395
 
-1. **Embedding de ventana deslizante**: Convierte trayectoria temporal en nube de puntos en espacio de alta dimensión. Una ventana de L puntos en 2D se representa como punto en espacio 2L-dimensional
-2. **Centrado de trayectoria**: Resta la posición media para remover deriva espacial
-3. **Complejo de Vietoris-Rips**: Construcción topológica sobre la nube de puntos
-4. **Homología persistente**: Calcula características topológicas que persisten a través de múltiples escalas:
-   - H₀: componentes conectadas
-   - H₁: bucles/ciclos
-   - H₂: cavidades
-5. **Paisajes de persistencia**: Convierte diagramas de persistencia en vectores numéricos para machine learning
-6. **Clasificación**: Usa Support Vector Machines o Random Forest con los paisajes como features
+### 1.2 What the Paper Does
 
-**El paper prueba diferentes tamaños de ventana** (L = 10, 20, 50 puntos) y encuentra que el óptimo **depende del dataset**.
+**Experimental setup**:
+- Adult C. elegans immersed in **methylcellulose** at different viscosities (0.5%, 1%, 2%)
+- 30 fps video acquisition
+- Worms tracked using skeleton midline (100-dimensional time series per frame)
+- Goal: Classify environmental viscosity from movement patterns
 
-### 2.2 Qué datos usa el paper
+**Methodology**:
+1. **Data preprocessing**: Extract midline skeleton → 100D time series
+2. **Patch segmentation**: Divide videos into overlapping 300-frame patches (50% overlap)
+3. **Sliding window embedding**: Window length L ∈ {1, 10, 20, 30} frames
+   - Primary analysis uses L=20 (0.67 seconds at 30 fps = ~1 forward crawl period)
+4. **Topological computation**:
+   - Vietoris-Rips complex on embedded point cloud
+   - Compute H₁ (degree 1) persistent homology
+   - Extract persistence landscapes with depth 5, discretized at resolution ~1000 points
+5. **Classification**:
+   - Multiclass SVM (RBF kernel, C=10)
+   - 10-fold cross-validation, 20 repetitions
+   - Feature: Flattened persistence landscapes
 
-- Tres datasets de validación:
-  1. *C. elegans* N2 en medio líquido vs agar
-  2. *C. elegans* mutante *tax-4* vs wild-type
-  3. *Drosophila melanogaster* en diferentes condiciones
-- Trayectorias de centroide
-- Datos previamente publicados de cada sistema
+**Window length selection**:
+- Paper cross-validates L ∈ {1, 10, 20, 30}
+- Finding: L=1 (raw data) gives **highest accuracy** (95.5%)
+- But L=20 provides better **interpretability** (clearer PCA separation)
+- **Trade-off acknowledged**: accuracy vs. interpretability
 
-### 2.3 Qué hace nuestra implementación
+**Key results**:
+- 95.5% accuracy distinguishing 3 viscosity classes (L=1)
+- 83.4% accuracy with L=20
 
-1. Centra cada trayectoria sustrayendo posición media
-2. Aplica ventanas deslizantes de **tamaño fijo L=20 puntos**
-3. Cada ventana se representa como punto en espacio 40-dimensional
-4. Construye complejo de Vietoris-Rips hasta dimensión 2
-5. Calcula homología persistente (H₀, H₁, H₂)
-6. Extrae paisajes de persistencia, principalmente de H₁ (bucles)
-7. Usa Support Vector Machines para clasificación binaria (Control vs cada tratamiento)
+### 1.3 What Our Implementation Does
 
-**Datos utilizados**:
-- Trayectorias de 7 cepas × múltiples tratamientos cannabinoides
-- Análisis por cepa: cada clasificador es Control vs un tratamiento específico
+**File**: `methodology_tda.py`
 
-### 2.4 Diferencias principales
+**Data context** (CRITICAL DIFFERENCE):
+- Adult C. elegans on **agar plates** treated with cannabinoids
+- 1 Hz sampling (vs 30 Hz in paper)
+- **Centroid tracking only** (x, y) → 2D time series (vs 100D skeleton)
+- Goal: Classify treatment (Control vs CBD/CBDV/etc.)
 
-#### Alineamiento metodológico
-- ✅ Pipeline topológico idéntico (embedding → Vietoris-Rips → persistencia → paisajes)
-- ✅ Centrado de trayectorias coincide con el paper
-- ✅ Uso de Support Vector Machines coincide con uno de los clasificadores del paper
-- ✅ Dimensión del complejo (dim 2) coincide con el paper
+**Implementation**:
+1. **No patch segmentation**: Uses full trajectories
+2. **Sliding window embedding**: L ∈ {10, 20, 50} frames
+   - At 1 Hz: L=20 → 20 seconds (vs 0.67 seconds in paper)
+3. **Centering**: Subtracts mean position (removes spatial drift)
+4. **Topological computation**:
+   - Vietoris-Rips with `max_edge_length=np.inf` (unbounded)
+   - H₁ persistent homology
+   - Landscape: `num_landscapes=5, resolution=100` (vs ~1000 in paper)
+5. **Classification**:
+   - Binary SVM per treatment (Control vs each treatment)
+   - RBF kernel, C=1.0 (vs C=10 in paper)
+   - 70/30 train-test split, single run (vs 20×10-fold CV in paper)
+6. **Window selection**: Mean accuracy across treatments (highest wins)
 
-#### Diferencias clave
+### 1.4 Critical Analysis
 
-**Tamaño de ventana**:
-- **Paper**: Prueba L ∈ {10, 20, 50} y selecciona el mejor para cada dataset
-- **Implementación**: Usa L=20 fijo para todos los casos
+#### ✅ Strengths
 
-**Clasificadores**:
-- **Paper**: Compara SVM vs Random Forest, reporta resultados de ambos
-- **Implementación**: Solo usa SVM
+1. **Core pipeline intact**: Sliding window → Rips → H₁ → Landscapes → SVM
+2. **Window length optimization**: Tests multiple L values and selects best
+3. **Computational efficiency**: Parallel processing, reasonable discretization
 
-#### Validación estadística
+#### ⚠️ Moderate Issues
 
-El paper de Thomas et al. reporta accuracy, precision, recall y F1-score. **No menciona**:
-- Pruebas de permutación
-- Intervalos de confianza
-- Correcciones por comparaciones múltiples
+1. **Temporal resolution mismatch**:
+   - Paper: 30 Hz → L=20 ≈ 0.67s (one crawl cycle)
+   - Ours: 1 Hz → L=20 ≈ 20s (biological meaning unclear)
+   - **Impact**: Window length rationale breaks down
 
-Nuestra implementación reporta las mismas métricas (accuracy y F1), coincidiendo con el enfoque del paper.
+2. **Different window range**:
+   - Paper: {1, 10, 20, 30}
+   - Ours: {10, 20, 50}
+   - Missing L=1 (raw data, paper's **best performer**)
 
----
+3. **Landscape resolution**:
+   - Paper: ~1000 points (fine discretization)
+   - Ours: 100 points (10× coarser)
+   - **Potential impact**: Loss of topological detail
 
-## 3. Screening por Machine Learning (García-Garví et al. 2025)
+4. **SVM hyperparameters**:
+   - Paper: C=10 (stronger regularization control)
+   - Ours: C=1.0 (default)
+   - **Likely minor** but unexplained deviation
 
-### 3.1 Qué hace el paper
+#### 🚨 Critical Issues
 
-García-Garví et al. (2025) desarrolla un pipeline de screening toxicológico con **validación estadística rigurosa**:
+1. **No patch segmentation**:
+   - Paper divides long videos into 300-frame patches
+   - Ours uses full trajectories (variable length)
+   - **Problem**: Some trajectories may be too short (<20 frames) or too long (>1000 frames)
+   - **Impact**: Feature scale inconsistency across worms
 
-#### Extracción de features
+2. **Validation scheme**:
+   - Paper: 20 repetitions × 10-fold CV (robust estimate)
+   - Ours: Single 70/30 split (high variance)
+   - **Problem**: Accuracy estimates unreliable, no confidence intervals
 
-Usa sistema de tracking multi-esqueleto para obtener **256 features**:
-- **90 features de cinemática del centroide**: velocidad, aceleración, cambios de dirección
-- **166 features de morfología y esqueleto**: curvatura corporal, longitud, ángulos de segmentos
-- **Features temporales**: frecuencias, duraciones, amplitudes de comportamientos específicos
+3. **Biological context shift**:
+   - Paper: Viscosity (physical impediment) affects movement **periodicity**
+   - Ours: Cannabinoids (neurochemical) may affect **speed, pausing, exploration**
+   - **Hypothesis violation**: TDA detects periodic loops; not clear cannabinoids alter periodicity
 
-#### Preprocesamiento estadístico (CRÍTICO)
+4. **Dimensionality reduction**:
+   - Paper: 100D skeleton → rich shape information
+   - Ours: 2D centroid → **only positional** info
+   - **Critical**: Centroid loses posture (body curvature, head movements)
+   - **Impact**: May miss phenotypes detectable by Thomas et al.
 
-1. **Pruebas de permutación por bloques**: 10,000 permutaciones por feature
-   - Cada experimento es un "bloque" con control interno
-   - Permuta etiquetas dentro de cada bloque
-   - Calcula t-estadístico para cada permutación
+#### 📊 Quantitative Comparison
 
-2. **Corrección de Benjamini-Yekutieli**: Controla tasa de falso descubrimiento (FDR < 0.1)
-   - Más conservadora que Benjamini-Hochberg
-   - Asume dependencia arbitraria entre features
+| Aspect | Thomas et al. 2021 | Our Implementation | Assessment |
+|--------|-------------------|-------------------|------------|
+| Input dimensions | 100D (skeleton) | 2D (centroid) | ⚠️ 50× reduction |
+| Sampling rate | 30 Hz | 1 Hz | ⚠️ 30× reduction |
+| Window length (time) | 0.67s | 20s | ❌ 30× longer |
+| Window lengths tested | 1, 10, 20, 30 | 10, 20, 50 | ⚠️ Missing L=1 |
+| Landscape resolution | ~1000 | 100 | ⚠️ 10× coarser |
+| Validation | 20×10-fold CV | 1×70/30 split | ❌ Weak |
+| SVM C parameter | 10 | 1.0 | ⚠️ Minor |
 
-3. **Selección de features**: Solo usa features estadísticamente significativos para clasificación
+### 1.5 Recommendations
 
-#### Clasificación (Nivel 1)
-
-- Reduce dimensionalidad aplicando PCA sobre features significativos
-- Random Forest con validación cruzada
-- Objetivo: Distinguir Tóxico vs No-tóxico
-
-#### Clasificación (Nivel 2)
-
-- Solo para compuestos clasificados como tóxicos
-- Clasifica tipo de toxicidad (neurotóxica, oxidativa, etc.)
-
-### 3.2 Qué datos usa el paper
-
-- Tracking multi-esqueleto con análisis de contorno corporal completo
-- **256 features** por gusano
-- **Diseño experimental por bloques**: cada experimento incluye control negativo, control positivo y compuestos test
-- Cepa N2 wild-type
-- Panel de compuestos con toxicidad conocida para validación
-
-### 3.3 Qué hace nuestra implementación
-
-#### Extracción de features
-
-Calcula **13 features cinemáticas** del centroide únicamente:
-- **Velocidad (7 features)**: media, desviación estándar, mínimo, cuartiles 25%, 50%, 75%, máximo
-- **Ángulos de giro (3 features)**: media del valor absoluto, desviación estándar, máximo absoluto
-- **Trayectoria (3 features)**: longitud total, desplazamiento neto, ratio de confinamiento
-
-#### Clasificación
-
-1. Normaliza features estandarizando (media 0, varianza 1)
-2. Random Forest para clasificación binaria
-3. División 70% entrenamiento, 30% prueba
-4. Reporta accuracy y F1-score por clase
-
-#### No incluye
-
-- Pruebas de permutación previas a clasificación
-- Corrección de Benjamini-Yekutieli
-- Selección de features significativos antes de clasificar
-- Análisis de morfología de esqueleto
-
-### 3.4 Diferencias principales
-
-#### Diferencias cuantitativas críticas
-
-**Número de features**:
-- **Paper**: 256 features (90 cinemática + 166 morfología)
-- **Implementación**: 13 features (solo cinemática básica)
-- **Reducción**: 95% de features eliminadas
-
-**Hallazgo crítico del paper**: García-Garví et al. reportan explícitamente que:
-> "Intentamos usar solo features cinemáticos básicos del centroide y **no detectamos ningún compuesto tóxico** al aplicar corrección estadística rigurosa. Solo al expandir a 256 features incluyendo morfología del esqueleto logramos identificar compuestos tóxicos con significancia estadística."
-
-Esto sugiere que nuestra implementación probablemente tiene **bajo poder estadístico** para detectar efectos sutiles.
-
-#### Diferencias en validación estadística (CRÍTICAS)
-
-**Pipeline del paper (orden estricto)**:
-1. **Primero**: Pruebas de permutación por feature (10,000 permutaciones × N_features)
-2. **Segundo**: Corrección de Benjamini-Yekutieli (FDR < 0.1)
-3. **Tercero**: Clasificación SOLO con features significativos
-
-**Pipeline de implementación**:
-1. Clasificación directa con todas las 13 features
-2. Sin pruebas de significancia estadística previas
-3. Sin correcciones por comparaciones múltiples
-
-#### Alineamiento metodológico
-
-- ✅ Uso de Random Forest coincide con el paper
-- ✅ Normalización de features (estandarización)
-- ❌ **Ausencia TOTAL del pipeline de validación estadística**
-- ❌ **Reducción masiva del espacio de features (256 → 13)**
-- ❌ Sin análisis de morfología de esqueleto
-
-#### Implicaciones
-
-Sin validación estadística previa:
-- Un accuracy del 70% podría deberse a overfitting, no a diferencias reales
-- No sabemos si las features usadas son significativamente diferentes entre grupos
-- Sin corrección múltiple, ~1/20 comparaciones será "significativa" por azar (p<0.05)
+1. **Add L=1 test**: Paper's best performer
+2. **Implement proper cross-validation**: At minimum 10-fold CV
+3. **Consider patch segmentation**: Standardize trajectory lengths
+4. **Document biological hypothesis**: Why expect topological changes with cannabinoids?
+5. **Test on known phenotype**: Validate with unc mutants first
 
 ---
 
-## 4. Descubrimiento de Estados Conductuales No Supervisado
+## 2. Lévy Flight Analysis
 
-### 4.1 Metodología implementada
+### 2.1 Source Paper
 
-Esta metodología **NO tiene un paper de referencia específico válido**.
+**Moy, K., Li, W., Tran, H.P., et al. (2015)**
+*Computational Methods for Tracking, Quantitative Assessment, and Visualization of C. elegans Locomotory Behavior*
+PLOS ONE, 10(12):e0145870
 
-**Aclaración importante sobre Koren et al. 2015**: El paper "Model-Independent Phenotyping of C. elegans Locomotion Using Scale-Invariant Feature Transform" por Koren et al. (2015) **NO usa el enfoque implementado**.
+### 2.2 What the Paper Does
 
-#### Qué hace realmente Koren et al. 2015
+**Experimental setup**:
+- Adult C. elegans on **agar plates** with/without food
+- Centroid tracking at **1 Hz** (Δt = 1 second)
+- Minimum 20 minutes recording
+- Goal: Distinguish local search (Brownian) from global search (Lévy flight)
 
-- Usa **SIFT (Scale-Invariant Feature Transform)** - descriptores de visión por computadora
-- **NO extrae features cinemáticas** (velocidad, curvatura, etc.)
-- Trabaja directamente con imágenes crudas
-- Construye un "vocabulario visual" mediante k-means clustering de descriptores SIFT
-- Representa cada video como histograma de "palabras visuales" (descriptores SIFT frecuentes)
-- Compara videos por distancia euclidiana entre histogramas
-- Es completamente "model-independent" - no requiere definir features específicas del gusano
+**Methodology** (cites Reynolds et al. 2007, Codling et al. 2008):
+1. **Sampling**: Centroid (Cₓ, Cᵧ) at Δt = 1 sec intervals
+2. **Turning event detection**:
+   - Compute heading angle φ between consecutive positions
+   - Turning event if |φ_current - φ_previous| > Θ (threshold)
+   - Paper uses Θ = 40° (empirically determined)
+3. **Step length calculation**:
+   - Step = Euclidean distance between consecutive turning events
+   - S_j = √[(Cₓⱼ - Cₓⱼ₋₁)² + (Cᵧⱼ - Cᵧⱼ₋₁)²]
+4. **Power-law fitting**:
+   - Use `powerlaw` library (Clauset et al. 2009 method)
+   - Fit: P(step > s) ~ s^(-α) for s ≥ xₘᵢₙ
+   - Maximum likelihood estimation of α and xₘᵢₙ
+5. **Model comparison**:
+   - Compare power-law vs lognormal via log-likelihood ratio R
+   - p-value from Vuong's test
+   - **Lévy-like if**: R > 0 and p < 0.05
 
-#### Qué hace nuestra implementación (DIFERENTE a Koren 2015)
+**Key findings**:
+- ~20% of food-deprived N2 show Lévy flight patterns
+- α typically in range [1.5, 2.5] when Lévy-like
 
-1. **Extracción de features cinemáticas**: Mismas 13 features que ML Screening
-2. **Normalización**: Estandarización (media 0, varianza 1)
-3. **Reducción de dimensionalidad**: PCA (retiene componentes que explican 95% de varianza)
-4. **Clustering**: Modelos de Mezcla Gaussiana (GMM) con matriz de covarianza completa
-5. **Selección de K**: Minimiza Criterio de Información Bayesiano (BIC), K entre 2 y 10
-6. **Interpretación post-hoc de estados**:
-   - **Estado de pausa**: Estado con menor velocidad promedio
-   - **Estado de crucero/activo**: Estado con mayor desplazamiento neto
-7. **Análisis de distribución**: Porcentaje de gusanos en cada estado por tratamiento
+### 2.3 What Our Implementation Does
 
-### 4.2 Análisis crítico sin paper de referencia
+**File**: `methodology_levy_flight.py`
 
-#### Naturaleza de la metodología
+**Data context**:
+- ✅ Same: Agar plates, 1 Hz sampling, centroid tracking
+- Different: Cannabinoid treatments (not food deprivation)
 
-Esta es una **aplicación estándar de técnicas de clustering no supervisado** (GMM + PCA + BIC) comúnmente usadas en análisis de datos conductuales, pero:
+**Implementation**:
+1. **Sampling**: Uses raw 1 Hz data (correct)
+2. **Turning event detection**:
+   ```python
+   vectors = np.diff(points, axis=0)
+   angles = np.arctan2(vectors[:, 1], vectors[:, 0])
+   angles_unwrapped = np.unwrap(angles)  # ← Key step
+   turning_angles = np.diff(angles_unwrapped)
+   turning_angles_deg = np.abs(np.rad2deg(turning_angles))
+   turn_indices = np.where(turning_angles_deg > 40)[0] + 1
+   ```
+3. **Step lengths**: Euclidean distance (correct)
+4. **Power-law fitting**: `powerlaw.Fit(all_step_lengths, discrete=False)`
+5. **Model comparison**: R, p from `.distribution_compare('power_law', 'lognormal')`
 
-- **No sigue ningún paper específico publicado** para *C. elegans*
-- No está validada contra un gold standard
-- Las decisiones metodológicas (K entre 2-10, BIC, 95% varianza en PCA) son arbitrarias
+### 2.4 Critical Analysis
 
-#### Ausencia de validación estadística
+#### ✅ Strengths
 
-**No se reportan**:
-- Pruebas de significancia para diferencias en ocupación de estados entre tratamientos
-- Intervalos de confianza para porcentajes de ocupación
-- Correcciones por comparaciones múltiples (múltiples estados × múltiples tratamientos)
+1. **High fidelity to paper**:
+   - Identical sampling rate (1 Hz)
+   - Same data type (centroid)
+   - Same threshold (40°)
+   - Same statistical test (R, p-value)
 
-**Ejemplo**: Si se reporta "Tratamiento X aumenta estado de pausa de 20% a 35%", no sabemos:
-- Si 15% de diferencia es estadísticamente significativa
-- Qué tan variable es esta medida (intervalo de confianza)
-- Si sobrevive corrección por comparaciones múltiples
+2. **Correct angle handling**:
+   - Uses `np.unwrap()` to avoid ±180° discontinuities
+   - This is **better** than simple modulo wrapping
 
-#### Limitaciones conceptuales
+3. **Proper method citation**:
+   - Paper cites Reynolds 2007 and Codling 2008
+   - We indirectly follow same algorithm
 
-1. **BIC no garantiza validez biológica**: Selecciona modelo que balancea ajuste estadístico vs complejidad, pero no valida que:
-   - Los estados sean reproducibles entre experimentos
-   - Los estados tengan significado biológico distinto
-   - K óptimo sea estable (bootstrap)
+#### ⚠️ Moderate Issues
 
-2. **Interpretación circular**: Llamar "pausa" al estado de baja velocidad es post-hoc. No valida que:
-   - La pausa sea un estado discreto vs extremo de un continuo
-   - Exista bimodalidad en distribución de velocidades
-   - Las transiciones entre estados sean raras (evidencia de estados discretos)
+1. **Pooling across worms**:
+   - Paper: Analyzes individual worms, reports % showing Lévy
+   - Ours: Pools all step lengths per treatment group
+   - **Impact**: Cannot report "% of worms with Lévy pattern"
+   - **Consequence**: Lose individual-level heterogeneity
 
-3. **Dependencia de features**: Con solo 13 features y PCA al 95%, probablemente se usan ~5-8 componentes principales. Expandir a más features (como sugiere García-Garví) cambiaría completamente el clustering.
+2. **No minimum step length filtering**:
+   - Paper mentions xₘᵢₙ is estimated, but also discusses filtering very short steps
+   - Ours: Uses all step lengths > 0
+   - **Potential issue**: Very short steps (<1 pixel) may be noise
 
-### 4.3 Comparación imposible
+#### 🚨 Critical Issues
 
-**Conclusión**: No se puede hacer una comparación metodológica formal contra un paper de referencia porque:
-- Koren 2015 usa una metodología completamente diferente (SIFT, no features cinemáticas)
-- No existe un paper publicado que haga exactamente GMM + PCA sobre features cinemáticas de trayectorias de centroide de *C. elegans*
+1. **Multiple comparisons problem**:
+   - Paper: ~2-3 conditions tested (food vs no food, few genotypes)
+   - Ours: 7 strains × 8 treatments ≈ **56 tests**
+   - **No correction** for multiple comparisons (e.g., Bonferroni, FDR)
+   - **Expected false positives**: 56 × 0.05 ≈ **2.8 "significant" results by chance**
+   - **Critical flaw**: Cannot distinguish real Lévy patterns from Type I errors
 
-La implementación es una **metodología ad-hoc** usando herramientas estándar de clustering, sin validación formal publicada.
+2. **Biological context**:
+   - Paper: Food deprivation → adaptive foraging strategy (well-established)
+   - Ours: Cannabinoids → unknown effect on search strategy
+   - **Problem**: Applying foraging theory to pharmacology unclear
+
+3. **Sample size per treatment**:
+   - Paper doesn't specify minimum, but emphasizes 20-minute recordings
+   - Ours: Some treatments may have few worms or short trajectories
+   - **Issue**: Power-law fitting unreliable with <50-100 step lengths
+
+4. **No biological validation**:
+   - Paper validates with food presence/absence (known to modulate search)
+   - Ours: No positive control (e.g., food-deprived vs fed comparison)
+
+#### 📊 Quantitative Comparison
+
+| Aspect | Moy et al. 2015 | Our Implementation | Assessment |
+|--------|----------------|-------------------|------------|
+| Sampling rate | 1 Hz | 1 Hz | ✅ Identical |
+| Threshold angle | 40° | 40° | ✅ Identical |
+| Step length calc | Euclidean | Euclidean | ✅ Identical |
+| Power-law method | MLE | MLE (powerlaw lib) | ✅ Identical |
+| Model comparison | R, p-value | R, p-value | ✅ Identical |
+| Angle handling | Not specified | `unwrap()` | ✅ Robust |
+| Pooling strategy | Per worm | Per treatment | ⚠️ Different |
+| Multiple comparison correction | None (2-3 tests) | None (56 tests) | ❌ Critical |
+
+### 2.5 Recommendations
+
+1. **Add multiple comparison correction**: Benjamini-Hochberg FDR at minimum
+2. **Report per-worm statistics**: % of worms showing Lévy per treatment
+3. **Minimum sample size filter**: Require ≥50 step lengths per analysis
+4. **Positive control**: Include food-deprived vs fed condition
+5. **Confidence intervals**: Bootstrap α estimates
 
 ---
 
-## Resumen Comparativo Global
+## 3. Machine Learning Screening
 
-### Lévy Flight (Moy et al. 2015)
-- **Fidelidad metodológica**: Alta (>95%)
-- **Alineamiento algorítmico**: Casi perfecto
-- **Problema identificado**: Posible error en normalización de ángulos al cruzar límite ±180°
-- **Validación estadística**: Coincide con paper (usa R y p-value; no correcciones múltiples)
-- **Escala**: Paper analiza 2-3 condiciones; implementación ~56 pruebas sin corrección
+### 3.1 Source Papers (Distinction Critical)
 
-### TDA (Thomas et al. 2021)
-- **Fidelidad metodológica**: Alta (>90%)
-- **Alineamiento algorítmico**: Excelente
-- **Diferencia principal**: Tamaño de ventana fijo (L=20) vs optimización por dataset
-- **Validación estadística**: Coincide con paper (accuracy, precision, recall, F1)
-- **Limitación**: No explora hiperparámetro crítico (tamaño de ventana)
+**Primary reference**:
+**García-Garví, A. & Sánchez-Salmerón, A.J. (2025)**
+*High-throughput behavioral screening in Caenorhabditis elegans using machine learning for drug repurposing*
+Scientific Reports, 15:26140
 
-### ML Screening (García-Garví et al. 2025)
-- **Fidelidad metodológica**: Muy baja (~20%)
-- **Diferencias críticas**:
-  - **Features**: 256 → 13 (95% reducción)
-  - **Validación estadística**: Completa (permutación + BH/BY) → Ninguna (0%)
-  - **Morfología**: Esqueleto completo → Solo centroide
-- **Hallazgo del paper**: Features reducidas similares a las nuestras = cero detecciones
-- **Implicación**: Implementación probablemente tiene bajo poder estadístico
+**Data source cited by García-Garví**:
+**O'Brien, T.J., Barlow, I.L., Feriani, L., & Brown, A.E. (2025)**
+*High-throughput tracking enables systematic phenotyping and drug repurposing in C. elegans disease models*
+eLife, 12:RP92491
 
-### Estados No Supervisados (Sin paper de referencia)
-- **Fidelidad metodológica**: No aplica
-- **Paper citado incorrectamente**: Koren 2015 usa SIFT (visión por computadora), no GMM sobre features cinemáticas
-- **Naturaleza**: Metodología ad-hoc usando técnicas estándar (GMM + PCA + BIC)
-- **Validación estadística**: Ausente (no pruebas de significancia, no correcciones múltiples)
-- **Limitaciones**: Interpretación post-hoc, sin validación de reproducibilidad, sin gold standard
+⚠️ **Critical**: García-Garví **analyzes** O'Brien's data. O'Brien is the **original method developer**.
+
+### 3.2 What O'Brien et al. 2025 Does (Cited by García-Garví)
+
+**Experimental setup**:
+- CRISPR-generated disease models (25 strains)
+- Tierpsy Tracker: **256 features** from **skeleton tracking**
+  - 90 kinematic features (speed, curvature, etc.)
+  - 166 morphological features (length, area, body segments, etc.)
+- High-throughput imaging platform (16 wells, 3 worms/well)
+
+**Statistical validation pipeline**:
+1. **Block permutation tests**: 100,000 permutations per feature
+   - Blocks = experiments (control for batch effects)
+2. **Benjamini-Yekutieli correction**: FDR < 0.10
+   - More conservative than Benjamini-Hochberg
+3. **Feature selection**: Only significant features used
+
+**Critical finding reported**:
+> "When analysis was expanded to 256 predefined features, **no hits were detected**"
+
+**Why?** Stringent correction + 256 comparisons → low statistical power
+
+### 3.3 What García-Garví et al. 2025 Proposes
+
+**Contribution**: ML alternative to statistical testing
+
+**Two approaches compared**:
+1. **Traditional ML**: Random Forest on Tierpsy features (256 features)
+2. **Deep Learning**: CNN-Transformer on video clips
+
+**Findings**:
+- Random Forest outperforms DL slightly
+- ML can detect subtle patterns missed by p-value thresholding
+- **But**: Still uses Tierpsy Tracker (256 features from skeleton)
+
+### 3.4 What Our Implementation Does
+
+**File**: `methodology_ml_screening.py`
+
+**Data context** (CRITICAL DIFFERENCE):
+- **Input**: Centroid trajectories (x, y) only
+- **No skeleton**, no morphology
+
+**Feature extraction**:
+```python
+features = {
+    'speed_mean': np.mean(speeds),
+    'speed_std': np.std(speeds),
+    'speed_median': np.median(speeds),
+    'turning_mean': np.mean(np.abs(turning_angles)),
+    'turning_std': np.std(turning_angles),
+    'path_length': np.sum(speeds),
+    'displacement': np.linalg.norm(trajectory[-1] - trajectory[0]),
+    'confinement_ratio': displacement / path_length
+}
+```
+**Total: 8 features** (vs 256 in O'Brien/García-Garví)
+
+**Statistical validation** (IMPLEMENTED):
+1. Block permutation tests: 5000 permutations (vs 100,000 in O'Brien)
+2. Benjamini-Yekutieli correction: FDR < 0.10
+3. Feature selection: Uses only significant features
+4. If zero significant: Uses all (reports low power)
+
+**Classification**:
+- Random Forest (n_estimators=100, class_weight='balanced')
+- Binary: Control vs each treatment
+- 70/30 train-test split
+- Metrics: accuracy, precision, recall, F1
+
+### 3.5 Critical Analysis
+
+#### ✅ Strengths
+
+1. **Statistical validation present**:
+   - Contrary to initial documentation errors, code **does implement** permutation + BY
+   - Follows O'Brien's statistical framework
+   - Reports p-values and q-values
+
+2. **Feature selection logic**:
+   - Properly identifies significant features
+   - Falls back gracefully if none pass threshold
+
+3. **Block design**:
+   - Uses `experiment_id` for blocked permutations
+   - Controls batch effects
+
+#### ⚠️ Moderate Issues
+
+1. **Fewer permutations**:
+   - O'Brien: 100,000
+   - Ours: 5,000
+   - **Impact**: Slightly less precise p-values, but likely adequate
+
+2. **Train-test split**:
+   - Ours: Single 70/30 split
+   - Better: k-fold CV or repeated splits
+   - **Impact**: Accuracy variance unquantified
+
+#### 🚨 Critical Issues
+
+1. **Feature count mismatch**:
+   - O'Brien/García-Garví: **256 features** (skeleton morphology + kinematics)
+   - Ours: **8 features** (centroid kinematics only)
+   - **97% reduction in feature space**
+
+2. **O'Brien's key finding applies to us**:
+   - O'Brien: "With 256 features, **no hits detected** after statistical correction"
+   - Implication: Even 256 features insufficient with rigorous stats
+   - **Our situation**: Only 8 features → **even lower power**
+   - **Expected outcome**: Most treatments show zero significant features
+
+3. **Biological interpretation gap**:
+   - Morphological changes (body length, curvature) often critical for phenotyping
+   - Centroid alone misses:
+     - Body posture
+     - Head oscillations
+     - Omega turns
+     - Curling/coiling
+   - **Impact**: Can only detect **gross motor phenotypes** (speed, wandering)
+
+4. **No feature engineering**:
+   - Missing from our 8:
+     - Percentiles of speed (min, q25, q75, max)
+     - Angular acceleration
+     - Curvature proxies (turning radius)
+     - Temporal features (autocorrelation, periodicity)
+   - Even with centroid, could extract ~20-30 features
+
+5. **Multiple comparison burden**:
+   - 7 strains × 8 treatments × 8 features ≈ **448 feature tests**
+   - BY correction very conservative here
+   - **Expected**: Most features won't pass FDR < 0.10
+
+#### 📊 Quantitative Comparison
+
+| Aspect | O'Brien 2025 | García-Garví 2025 | Our Implementation | Assessment |
+|--------|-------------|------------------|-------------------|------------|
+| Input data | Skeleton | Skeleton (Tierpsy) | Centroid | ❌ Major diff |
+| Features | 256 | 256 | **8** | ❌ 97% reduction |
+| Permutations | 100,000 | N/A (uses ML) | 5,000 | ⚠️ Adequate |
+| Correction | BY (FDR<0.10) | None (ML-based) | BY (FDR<0.10) | ✅ Matches O'Brien |
+| Classifier | - | Random Forest | Random Forest | ✅ Matches García-Garví |
+| Validation | Manual review | Train/val/test | Single 70/30 | ⚠️ Weaker |
+
+### 3.6 Recommendations
+
+1. **Acknowledge severe limitations**:
+   - With 8 features vs 256, expect **very low detection power**
+   - Document: "Best for gross motor changes only"
+
+2. **Expand feature set** (still centroid-only):
+   - Speed: add min, q25, q75, max (4 more)
+   - Turning: add angular acceleration, max turning (2 more)
+   - Path: add radius of gyration, fractal dimension (2 more)
+   - Temporal: add autocorrelation lag-1 (1 more)
+   - **Target: ~20 features** from centroid
+
+3. **Positive controls**:
+   - Include known phenotypes (unc mutants, daf-2, etc.)
+   - Validate: Can we even detect gross motor defects?
+
+4. **Cross-validation**:
+   - Minimum: 5-fold CV
+   - Better: Nested CV for hyperparameter tuning
+
+5. **Consider alternative approaches**:
+   - If skeleton data ever available: Re-run with Tierpsy features
+   - Meanwhile: Document this as **preliminary/low-power** screen
 
 ---
 
-## Conclusiones Generales
+## 4. Summary and Overall Assessment
 
-### Metodologías bien implementadas
-1. **Lévy Flight**: Fidelidad alta, salvo posible bug de normalización angular
-2. **TDA**: Fidelidad alta, implementación sólida del pipeline topológico
+### 4.1 Methodology Fidelity Ranking
 
-### Metodologías con limitaciones severas
-3. **ML Screening**: Reducción masiva de features (256→13) y ausencia total de validación estadística
-4. **Estados No Supervisados**: Sin paper de referencia válido, metodología ad-hoc sin validación
+1. **Lévy Flight** (90% fidelity)
+   - ✅ Algorithm identical
+   - ✅ Data type matches (centroid, 1 Hz)
+   - ❌ Missing multiple comparison correction
+   - ❌ Pooling strategy differs
 
-### Hallazgos críticos transversales
+2. **TDA** (70% fidelity)
+   - ✅ Core pipeline preserved
+   - ⚠️ Window lengths mismatch
+   - ❌ Validation scheme weak
+   - ❌ Dimensionality 50× lower (centroid vs skeleton)
 
-1. **Ausencia sistemática de validación estadística rigurosa**:
-   - Ninguna metodología aplica correcciones por comparaciones múltiples
-   - Solo García-Garví 2025 menciona pruebas de permutación + corrección (no implementado)
-   - No se reportan intervalos de confianza ni pruebas de significancia
+3. **ML Screening** (60% fidelity)
+   - ✅ Statistical validation implemented
+   - ✅ Random Forest matches García-Garví
+   - ❌ Feature count 97% lower (8 vs 256)
+   - ❌ Biological relevance questionable
 
-2. **Problema de features reducidas**:
-   - García-Garví 2025 reporta explícitamente que features cinemáticas básicas (como las nuestras) no detectan efectos tras corrección estadística
-   - Solo al expandir a 256 features (morfología de esqueleto) logran detecciones significativas
+### 4.2 Critical Limitations Summary
 
-3. **Escalamiento sin ajuste estadístico**:
-   - Moy 2015: 2-3 comparaciones → Implementación: ~56 pruebas (sin corrección)
-   - Múltiples metodologías × múltiples cepas × múltiples tratamientos = cientos de pruebas estadísticas implícitas
+#### Data Limitations (Shared)
+- **Centroid-only tracking**: Loses morphology, posture, curvature
+- **1 Hz sampling**: Adequate for long-timescale search, marginal for TDA
+- **Agar environment**: Static (vs liquid in some papers)
+
+#### Lévy Flight
+- **56 tests without correction**: ~3 false positives expected
+- **No per-worm analysis**: Can't report % showing Lévy
+- **Biological hypothesis weak**: Cannabinoids ≠ foraging
+
+#### TDA
+- **30× longer windows**: Biological meaning lost
+- **Single train-test split**: Unreliable accuracy
+- **Missing L=1**: Paper's best performer
+- **50× lower dimensionality**: May miss relevant topology
+
+#### ML Screening
+- **8 vs 256 features**: Catastrophic power loss
+- **O'Brien precedent**: Even 256 features showed "no hits" with stats
+- **Implication**: Most treatments will show **zero significant features**
+
+### 4.3 Strengths Worth Preserving
+
+1. **Lévy**: Clean implementation, correct angle handling
+2. **TDA**: Proper window length optimization, parallelization
+3. **ML**: Full statistical validation (permutation + BY + selection)
+
+### 4.4 Recommendations for Revision
+
+#### Priority 1 (Critical)
+1. **Lévy**: Add Benjamini-Hochberg correction
+2. **TDA**: Implement k-fold cross-validation
+3. **ML**: Expand to ~20 features, document limitations
+4. **All**: Add positive controls (unc mutants, food deprivation)
+
+#### Priority 2 (Important)
+1. **Lévy**: Report per-worm statistics
+2. **TDA**: Test L=1, reduce landscape resolution mismatch
+3. **ML**: Nested CV for hyperparameters
+4. **All**: Confidence intervals / bootstrapped estimates
+
+#### Priority 3 (Nice to have)
+1. **TDA**: Patch segmentation for length standardization
+2. **ML**: Feature importance stability (across CV folds)
+3. **All**: Automated reporting (Markdown summaries)
+
+---
+
+## 5. Conclusions
+
+### 5.1 Methodological Validity
+
+All three methodologies are **algorithmically sound** when compared to their source papers. The core mathematical procedures (persistent homology, power-law fitting, Random Forest) are correctly implemented.
+
+### 5.2 Biological Applicability
+
+The **critical issue** is not implementation fidelity, but **data compatibility**:
+
+- **Papers assume**: Rich data (skeleton, high frame rate)
+- **We have**: Minimal data (centroid, 1 Hz)
+
+This is not a code problem—it's a **fundamental limitation**.
+
+### 5.3 Statistical Robustness
+
+- **Lévy**: Needs multiple comparison correction (easy fix)
+- **TDA**: Needs proper cross-validation (moderate fix)
+- **ML**: Needs more features (hard fix without better tracking)
+
+### 5.4 Expected Outcomes
+
+**Realistic expectations given our data**:
+
+1. **Lévy Flight**: May detect changes in search strategy (if cannabinoids affect exploration)
+   - But: High false positive risk without correction
+   - Solution: Apply FDR correction
+
+2. **TDA**: Unclear if cannabinoids alter movement periodicity
+   - Topology best suited for rhythmic behavior changes
+   - May show null results (not a failure—just wrong tool for question)
+
+3. **ML Screening**: Low power to detect subtle effects
+   - Will reliably detect **only gross motor defects** (e.g., paralysis, hyperactivity)
+   - Subtle phenotypes (body posture, turning style) → missed
+
+### 5.5 Path Forward
+
+**Option A** (Current data):
+- Apply statistical corrections
+- Add positive controls
+- **Accept low sensitivity** for subtle phenotypes
+- Document limitations clearly
+
+**Option B** (Better data):
+- Re-track with skeleton extraction (Tierpsy, OpenWorm, etc.)
+- Higher frame rate acquisition (10-30 Hz)
+- Re-run all methods with full features
+
+**Option C** (Hybrid):
+- Use current methods as **screening** (high specificity)
+- Validate hits with detailed manual annotation
+- Focus biological follow-up on strong signals only
+
+---
+
+**End of Document**
