@@ -23,7 +23,7 @@ from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.svm import SVC
 from sklearn.metrics import classification_report, accuracy_score
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from joblib import Parallel, delayed, cpu_count
 
 from utils_data import load_data_for_strain
 
@@ -99,7 +99,10 @@ def _compute_landscape_for_trajectory(args):
     Args:
         args: tuple(window_length, trajectory, treatment, track_idx, n_tracks)
     Returns:
-        (treatment, landscape_flat) or None if no valid H1 features.
+        (treatment, h1_landscape_flat, h0_landscape_flat) or None if no valid features.
+        
+    Following Thomas et al. (2021), we compute persistent homology on sliding window embeddings.
+    H1 captures loops (quasi-periodic behavior), H0 captures connected components.
     """
     window_length, trajectory, treatment, track_idx, n_tracks = args
 
@@ -117,13 +120,27 @@ def _compute_landscape_for_trajectory(args):
     rips_complex = gudhi.RipsComplex(points=points, max_edge_length=np.inf)
     simplex_tree = rips_complex.create_simplex_tree(max_dimension=2)
     diag = simplex_tree.persistence()
+    
+    # Extract H0 (connected components) and H1 (loops)
+    h0_diag = [p for (dim, p) in diag if dim == 0 and p[1] != float('inf')]
     h1_diag = [p for (dim, p) in diag if dim == 1]
+    
+    # We need at least H1 features for the main analysis
     if not h1_diag:
         return None
 
     landscape_computer = Landscape(num_landscapes=5, resolution=1000)
-    landscape = landscape_computer.fit_transform([np.array(h1_diag)])
-    return treatment, landscape.flatten()
+    
+    # Compute H1 landscape (main feature)
+    h1_landscape = landscape_computer.fit_transform([np.array(h1_diag)])
+    
+    # Compute H0 landscape if available (supplementary feature)
+    if h0_diag:
+        h0_landscape = landscape_computer.fit_transform([np.array(h0_diag)])
+    else:
+        h0_landscape = np.zeros_like(h1_landscape)
+    
+    return treatment, h1_landscape.flatten(), h0_landscape.flatten()
 
 
 # ===========================================================================
@@ -135,45 +152,202 @@ def _extract_tda_features_for_strain(treatment_data, window_length: int):
     """Compute persistence landscapes for all trajectories at a given window length.
 
     Returns:
-        dict[treatment] -> List[np.ndarray] of flattened landscapes.
+        tuple: (h1_features_by_treatment, h0_features_by_treatment)
+        Each is a dict[treatment] -> List[np.ndarray] of flattened landscapes.
+        
+    Following Thomas et al. (2021):
+    - H1 (loops) captures quasi-periodic behavior like undulation
+    - H0 (connected components) captures trajectory fragmentation/continuity
+    
+    OPTIMIZED: 
+    - Pre-filters short trajectories before parallelization
+    - Uses Pool.imap_unordered with optimal chunksize
+    - Reduces progress output overhead
     """
     print(f"\nExtracting topological features for all treatment groups (window length L={window_length})...")
-    features_by_treatment = defaultdict(list)
+    h1_features_by_treatment = defaultdict(list)
+    h0_features_by_treatment = defaultdict(list)
 
-    # Build jobs for all trajectories
+    # Build jobs for all trajectories - PRE-FILTER short trajectories
     jobs = []
+    skipped = 0
     for treatment, df in treatment_data.items():
         n_tracks = df['track_id'].nunique() if 'track_id' in df.columns else 0
-        print(f"  - Queuing treatment: {treatment} ({n_tracks} trajectories)")
+        valid_tracks = 0
         for track_idx, (_, worm_df) in enumerate(df.groupby('track_id'), start=1):
             trajectory = worm_df.sort_values('frame')[['x', 'y']].values
-            jobs.append((window_length, trajectory, treatment, track_idx, n_tracks))
+            # PRE-FILTER: Skip trajectories too short for window
+            if len(trajectory) >= window_length:
+                jobs.append((window_length, trajectory, treatment, track_idx, n_tracks))
+                valid_tracks += 1
+            else:
+                skipped += 1
+        print(f"  - Queuing treatment: {treatment} ({valid_tracks}/{n_tracks} valid trajectories)")
 
     if not jobs:
-        print(f"No trajectories found for window length L={window_length}.")
-        return features_by_treatment
+        print(f"No valid trajectories found for window length L={window_length}.")
+        return h1_features_by_treatment, h0_features_by_treatment
 
     total_jobs = len(jobs)
-    print(f"\nTotal trajectories queued for TDA (L={window_length}): {total_jobs}")
+    print(f"\nTotal trajectories queued for TDA (L={window_length}): {total_jobs} (skipped {skipped} short)")
 
-    processed = 0
-    max_workers = os.cpu_count() or 2
-    with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        future_to_job = {
-            executor.submit(_compute_landscape_for_trajectory, job): job
-            for job in jobs
-        }
-        for future in as_completed(future_to_job):
-            result = future.result()
-            processed += 1
-            if processed % 10 == 0 or processed == total_jobs:
-                print(f"    · Global trajectories processed: {processed}/{total_jobs}")
-            if result is None:
-                continue
-            treatment, landscape_flat = result
-            features_by_treatment[treatment].append(landscape_flat)
+    # OPTIMIZED: Use joblib for better numpy serialization and memory sharing
+    n_jobs = cpu_count() or 2
+    print(f"  Using joblib with {n_jobs} workers (backend=loky)")
+    
+    # Joblib Parallel with progress bar via verbose
+    # batch_size='auto' lets joblib optimize chunk sizes
+    results = Parallel(
+        n_jobs=n_jobs,
+        backend='loky',
+        verbose=10,  # Show progress (10 = detailed progress)
+        batch_size='auto',
+        prefer='processes'
+    )(delayed(_compute_landscape_for_trajectory)(job) for job in jobs)
+    
+    # Process results
+    valid_results = 0
+    for result in results:
+        if result is None:
+            continue
+        treatment, h1_landscape_flat, h0_landscape_flat = result
+        h1_features_by_treatment[treatment].append(h1_landscape_flat)
+        h0_features_by_treatment[treatment].append(h0_landscape_flat)
+        valid_results += 1
+    
+    print(f"  Completed: {valid_results} valid landscapes from {total_jobs} trajectories")
 
-    return features_by_treatment
+    return h1_features_by_treatment, h0_features_by_treatment
+
+
+def create_mds_visualization(features_by_treatment, output_dir, target_strain, window_length):
+    """Create Multidimensional Scaling visualization of persistence landscapes.
+    
+    Following Thomas et al. (2021) Figure 6: MDS of average persistence landscapes.
+    """
+    from sklearn.manifold import MDS
+    from sklearn.metrics import pairwise_distances
+    
+    # Compute average landscape per treatment
+    avg_landscapes = {}
+    for treatment, landscapes in features_by_treatment.items():
+        if landscapes:
+            avg_landscapes[treatment] = np.mean(landscapes, axis=0)
+    
+    if len(avg_landscapes) < 2:
+        print("  -> Not enough treatments for MDS visualization.")
+        return
+    
+    treatments = list(avg_landscapes.keys())
+    X = np.array([avg_landscapes[t] for t in treatments])
+    
+    # Compute pairwise distances
+    distances = pairwise_distances(X, metric='euclidean')
+    
+    # Apply MDS
+    mds = MDS(n_components=2, dissimilarity='precomputed', random_state=42, normalized_stress='auto')
+    coords = mds.fit_transform(distances)
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    # Color mapping
+    treatment_colors = {
+        'Control': PRIMARY_COLORS['gray'],
+        'ETANOL': PRIMARY_COLORS['yellow'],
+        'CBD 0.3uM': PRIMARY_COLORS['green'],
+        'CBD 3uM': PRIMARY_COLORS['teal'],
+        'CBD 30uM': PRIMARY_COLORS['cyan'],
+        'CBDV 0.3uM': PRIMARY_COLORS['blue'],
+        'CBDV 3uM': PRIMARY_COLORS['purple'],
+        'CBDV 30uM': PRIMARY_COLORS['magenta'],
+        'Total_Extract_CBD': PRIMARY_COLORS['orange'],
+    }
+    
+    for i, treatment in enumerate(treatments):
+        color = treatment_colors.get(treatment, PRIMARY_COLORS['gray'])
+        ax.scatter(coords[i, 0], coords[i, 1], s=200, c=color, 
+                  edgecolors='black', linewidth=1.5, label=treatment, zorder=5)
+        ax.annotate(treatment, (coords[i, 0], coords[i, 1]), 
+                   xytext=(5, 5), textcoords='offset points', fontsize=9)
+    
+    setup_plot_style(ax,
+                    title=f'MDS of Average Persistence Landscapes\n{target_strain} (L={window_length})',
+                    xlabel='MDS Dimension 1',
+                    ylabel='MDS Dimension 2')
+    
+    ax.legend(loc='upper right', fontsize=8, framealpha=0.9)
+    
+    plt.tight_layout()
+    plot_path = output_dir / f'mds_landscapes_L{window_length}.png'
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  MDS visualization saved to {plot_path}")
+
+
+def create_landscape_heatmap(features_by_treatment, output_dir, target_strain, window_length):
+    """Create heatmap of pairwise distances between treatment average landscapes."""
+    from sklearn.metrics import pairwise_distances
+    
+    # Compute average landscape per treatment
+    avg_landscapes = {}
+    for treatment, landscapes in features_by_treatment.items():
+        if landscapes:
+            avg_landscapes[treatment] = np.mean(landscapes, axis=0)
+    
+    if len(avg_landscapes) < 2:
+        return
+    
+    # Order treatments
+    treatment_order = [
+        'Control', 'ETANOL',
+        'CBD 0.3uM', 'CBD 3uM', 'CBD 30uM',
+        'CBDV 0.3uM', 'CBDV 3uM', 'CBDV 30uM',
+        'Total_Extract_CBD'
+    ]
+    treatments = [t for t in treatment_order if t in avg_landscapes]
+    X = np.array([avg_landscapes[t] for t in treatments])
+    
+    # Compute pairwise distances
+    distances = pairwise_distances(X, metric='euclidean')
+    
+    # Normalize distances
+    if distances.max() > 0:
+        distances_norm = distances / distances.max()
+    else:
+        distances_norm = distances
+    
+    # Create heatmap
+    fig, ax = plt.subplots(figsize=(10, 8))
+    
+    im = ax.imshow(distances_norm, cmap='viridis', aspect='auto')
+    
+    ax.set_xticks(range(len(treatments)))
+    ax.set_yticks(range(len(treatments)))
+    ax.set_xticklabels(treatments, rotation=45, ha='right')
+    ax.set_yticklabels(treatments)
+    
+    # Add text annotations
+    for i in range(len(treatments)):
+        for j in range(len(treatments)):
+            text = ax.text(j, i, f'{distances_norm[i, j]:.2f}',
+                          ha='center', va='center', color='white' if distances_norm[i, j] > 0.5 else 'black',
+                          fontsize=8)
+    
+    cbar = plt.colorbar(im, ax=ax)
+    cbar.set_label('Normalized Distance', rotation=270, labelpad=20)
+    
+    setup_plot_style(ax,
+                    title=f'Pairwise Distances Between Average Persistence Landscapes\n{target_strain} (L={window_length})',
+                    xlabel='Treatment',
+                    ylabel='Treatment')
+    ax.grid(False)
+    
+    plt.tight_layout()
+    plot_path = output_dir / f'landscape_distance_heatmap_L{window_length}.png'
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"  Landscape distance heatmap saved to {plot_path}")
 
 
 def _run_tda_classification_for_strain(
@@ -472,16 +646,17 @@ def main():
         candidate_mean_accuracies = {}
 
         for window_length in window_lengths:
-            features_by_treatment = _extract_tda_features_for_strain(
+            h1_features, h0_features = _extract_tda_features_for_strain(
                 treatment_data,
                 window_length,
             )
-            if not features_by_treatment:
+            if not h1_features:
                 print(f"  -> No features extracted for L={window_length}. Skipping.")
                 continue
 
+            # Use H1 features for classification (main analysis, as in Thomas et al.)
             results_summary = _run_tda_classification_for_strain(
-                features_by_treatment=features_by_treatment,
+                features_by_treatment=h1_features,
                 target_strain=target_strain,
                 output_dir=output_dir,
                 window_length=window_length,
@@ -494,7 +669,7 @@ def main():
             accuracies = [row['accuracy_mean'] for row in results_summary]
             mean_accuracy = float(np.mean(accuracies)) if accuracies else 0.0
             candidate_results[window_length] = results_summary
-            candidate_features[window_length] = features_by_treatment
+            candidate_features[window_length] = (h1_features, h0_features)
             candidate_mean_accuracies[window_length] = mean_accuracy
 
             print(f"  -> Mean classification accuracy for L={window_length}: {mean_accuracy:.3f}")
@@ -514,13 +689,21 @@ def main():
             f"(highest mean accuracy = {best_mean_accuracy:.3f})."
         )
 
+        # Get H1 and H0 features for best window length
+        best_h1_features, best_h0_features = candidate_features[best_window_length]
+        
         final_results_summary = _run_tda_classification_for_strain(
-            features_by_treatment=candidate_features[best_window_length],
+            features_by_treatment=best_h1_features,
             target_strain=target_strain,
             output_dir=output_dir,
             window_length=best_window_length,
             make_plots=True,
         )
+        
+        # Create additional visualizations (Thomas et al. 2021 style)
+        print("\n  Creating MDS and distance visualizations...")
+        create_mds_visualization(best_h1_features, output_dir, target_strain, best_window_length)
+        create_landscape_heatmap(best_h1_features, output_dir, target_strain, best_window_length)
 
         if not final_results_summary:
             print(f"No final results to save for strain {target_strain}.")

@@ -20,8 +20,18 @@ import seaborn as sns
 
 from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, accuracy_score, confusion_matrix
+from sklearn.feature_selection import RFE
+
+# Try to import XGBoost (optional dependency)
+XGBOOST_AVAILABLE = False
+try:
+    from xgboost import XGBClassifier
+    XGBOOST_AVAILABLE = True
+except (ImportError, OSError, Exception) as e:
+    print(f"Warning: XGBoost not available ({type(e).__name__}). Using RF and LogReg only.")
 
 from utils_data import load_data_for_strain
 
@@ -94,6 +104,90 @@ def setup_plot_style(ax, title=None, xlabel=None, ylabel=None):
 # Number of permutations for feature-level significance testing
 N_PERMUTATIONS = 5000
 FDR_ALPHA = 0.10
+
+# ===========================================================================
+# CLASSIFIER DEFINITIONS (García-Garví et al. 2025)
+# ===========================================================================
+
+def get_classifiers():
+    """Return dictionary of classifiers to compare.
+    
+    Following García-Garví et al. (2025), we compare:
+    - Random Forest (RF)
+    - XGBoost
+    - Logistic Regression
+    
+    Hyperparameters based on the paper:
+    - RF: max_depth=10, n_estimators=100
+    - XGBoost: max_depth=10, n_estimators=100
+    - Logistic Regression: default with balanced class weights
+    """
+    classifiers = {
+        'RandomForest': RandomForestClassifier(
+            n_estimators=100,
+            max_depth=10,  # García-Garví et al. used max_depth=10
+            min_samples_split=5,  # Following paper recommendations
+            random_state=42,
+            class_weight='balanced',
+            n_jobs=-1
+        ),
+        'LogisticRegression': LogisticRegression(
+            max_iter=1000,
+            random_state=42,
+            class_weight='balanced',
+            solver='lbfgs',
+            n_jobs=-1
+        ),
+    }
+    
+    if XGBOOST_AVAILABLE:
+        classifiers['XGBoost'] = XGBClassifier(
+            n_estimators=100,
+            max_depth=10,
+            learning_rate=0.1,
+            random_state=42,
+            use_label_encoder=False,
+            eval_metric='logloss',
+            n_jobs=-1
+        )
+    
+    return classifiers
+
+
+def perform_rfe_feature_selection(X, y, n_features_to_select=10, random_state=42):
+    """Recursive Feature Elimination (RFE) for feature selection.
+    
+    Following García-Garví et al. (2025), we use RFE with Random Forest
+    as the base estimator.
+    
+    Args:
+        X: Feature matrix
+        y: Labels
+        n_features_to_select: Number of features to select
+        random_state: Random seed
+        
+    Returns:
+        selected_indices: Indices of selected features
+        feature_ranking: Ranking of all features (1 = selected)
+    """
+    estimator = RandomForestClassifier(
+        n_estimators=50,
+        max_depth=10,
+        random_state=random_state,
+        class_weight='balanced',
+        n_jobs=-1
+    )
+    
+    rfe = RFE(
+        estimator=estimator,
+        n_features_to_select=n_features_to_select,
+        step=1
+    )
+    
+    rfe.fit(X, y)
+    
+    return rfe.support_, rfe.ranking_
+
 
 # ===========================================================================
 # FEATURE EXTRACTION
@@ -409,10 +503,14 @@ def main():
                 X_train_scaled = scaler.fit_transform(X_train)
                 X_test_scaled = scaler.transform(X_test)
 
+                # Use hyperparameters from García-Garví et al. (2025)
                 clf = RandomForestClassifier(
                     n_estimators=100,
+                    max_depth=10,  # Paper recommendation
+                    min_samples_split=5,  # Paper recommendation
                     random_state=42,
                     class_weight='balanced',
+                    n_jobs=-1
                 )
                 clf.fit(X_train_scaled, y_train)
 
@@ -465,6 +563,7 @@ def main():
 
             results_summary.append({
                 'treatment': treatment,
+                'classifier': 'RandomForest',
                 'accuracy_mean': mean_accuracy,
                 'accuracy_std': std_accuracy,
                 'precision_control': overall_report['Control']['precision'],
@@ -476,6 +575,40 @@ def main():
                 'n_significant_features_fdr': n_significant,
                 'n_folds': n_folds_actual,
             })
+            
+            # --- Compare with other classifiers (García-Garví et al. 2025) ---
+            print("  -> Comparing classifiers (RF, LogReg, XGBoost)...")
+            classifier_comparison = []
+            classifiers = get_classifiers()
+            
+            for clf_name, clf_model in classifiers.items():
+                clf_cv_accuracies = []
+                for train_idx, test_idx in skf.split(X, y):
+                    X_train, X_test = X[train_idx], X[test_idx]
+                    y_train, y_test = y[train_idx], y[test_idx]
+                    
+                    scaler = StandardScaler()
+                    X_train_scaled = scaler.fit_transform(X_train)
+                    X_test_scaled = scaler.transform(X_test)
+                    
+                    clf_model.fit(X_train_scaled, y_train)
+                    y_pred = clf_model.predict(X_test_scaled)
+                    clf_cv_accuracies.append(accuracy_score(y_test, y_pred))
+                
+                classifier_comparison.append({
+                    'classifier': clf_name,
+                    'accuracy_mean': np.mean(clf_cv_accuracies),
+                    'accuracy_std': np.std(clf_cv_accuracies),
+                })
+            
+            # Print comparison
+            for comp in classifier_comparison:
+                print(f"     {comp['classifier']}: {comp['accuracy_mean']:.3f} ± {comp['accuracy_std']:.3f}")
+            
+            # Save classifier comparison
+            comp_df = pd.DataFrame(classifier_comparison)
+            comp_path = output_dir / f'classifier_comparison_Control_vs_{treatment.replace(" ", "_")}.csv'
+            comp_df.to_csv(comp_path, index=False)
 
             print(f"  Mean Accuracy ({n_folds_actual}-fold CV): {mean_accuracy:.3f} ± {std_accuracy:.3f}")
             print(f"  Mean F1 (Control): {mean_f1_control:.3f}")
@@ -577,15 +710,16 @@ def main():
             # Remove grid for confusion matrix
             ax.grid(False)
 
-            # Add accuracy annotation
+            # Add accuracy annotation (placed just outside the right side of the axes
+            # so it never overlaps with the confusion matrix itself)
             annotation_text = (f'Accuracy: {mean_accuracy:.1%} ± {std_accuracy:.3f}\n'
                              f'F1 (Control): {mean_f1_control:.3f}\n'
                              f'F1 ({treatment}): {mean_f1_treatment:.3f}')
-            ax.text(1.45, 0.5, annotation_text,
-                   transform=ax.transData, ha='left', va='center',
+            ax.text(1.02, 0.5, annotation_text,
+                   transform=ax.transAxes, ha='left', va='center',
                    fontsize=9, fontfamily='monospace',
                    bbox=dict(boxstyle='round', facecolor='white',
-                           edgecolor='black', alpha=0.9, linewidth=1.5))
+                             edgecolor='black', alpha=0.9, linewidth=1.5))
 
             plt.tight_layout()
             cm_path = output_dir / f'confusion_matrix_Control_vs_{treatment.replace(" ", "_")}.png'

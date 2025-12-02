@@ -264,9 +264,10 @@ def create_velocity_colored_trajectories(treatment_data, output_dir, target_stra
             points = np.array([x, y]).T.reshape(-1, 1, 2)
             segments = np.concatenate([points[:-1], points[1:]], axis=1)
 
-            # Create colormap based on velocity (using plasma for better contrast on white background)
+            # Create colormap based on velocity with good contrast on a white background
+            # (viridis avoids very light/white tones, making trajectories more visible)
             norm = Normalize(vmin=0, vmax=np.percentile(velocity, 95))
-            lc = LineCollection(segments, cmap='plasma', norm=norm, linewidth=2)
+            lc = LineCollection(segments, cmap='viridis', norm=norm, linewidth=2)
             lc.set_array(velocity)
 
             # Plot
@@ -303,6 +304,151 @@ def create_velocity_colored_trajectories(treatment_data, output_dir, target_stra
         plt.savefig(plot_path, dpi=300, bbox_inches='tight', facecolor='white')
         plt.close()
         print(f"    Saved to {plot_path}")
+
+# ===========================================================================
+# ALPHA DISTRIBUTION VISUALIZATION
+# ===========================================================================
+
+def create_alpha_histogram(per_worm_df, output_dir, target_strain):
+    """Create histogram of α values per treatment with Lévy/Brownian threshold.
+    
+    Based on Moy et al. (2015) criterion: Lévy flight if 1 < α ≤ 3, Brownian if α > 3
+    """
+    if per_worm_df.empty:
+        return
+    
+    treatments = per_worm_df['treatment'].unique()
+    n_treatments = len(treatments)
+    
+    if n_treatments == 0:
+        return
+    
+    # Create figure with subplots
+    ncols = min(3, n_treatments)
+    nrows = (n_treatments + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(5*ncols, 4*nrows))
+    
+    if n_treatments == 1:
+        axes = np.array([axes])
+    axes = axes.flatten()
+    
+    fig.suptitle(f'Distribution of α (Power-law Exponent) per Treatment\n{target_strain}',
+                fontsize=14, fontweight='bold', y=1.02)
+    
+    for idx, treatment in enumerate(treatments):
+        ax = axes[idx]
+        treatment_data = per_worm_df[per_worm_df['treatment'] == treatment]['alpha'].dropna()
+        
+        if len(treatment_data) == 0:
+            ax.axis('off')
+            continue
+        
+        # Plot histogram
+        n_bins = min(20, max(5, len(treatment_data) // 5))
+        ax.hist(treatment_data, bins=n_bins, color=PRIMARY_COLORS['blue'], 
+               edgecolor='black', alpha=0.7, density=True)
+        
+        # Add vertical line at α = 3 (Lévy/Brownian threshold)
+        ax.axvline(x=3, color=PRIMARY_COLORS['red'], linestyle='--', linewidth=2,
+                  label='α=3 (Lévy/Brownian threshold)')
+        
+        # Add shaded regions
+        ylim = ax.get_ylim()
+        ax.axvspan(1, 3, alpha=0.15, color=PRIMARY_COLORS['green'], label='Lévy region (1<α≤3)')
+        ax.axvspan(3, ax.get_xlim()[1], alpha=0.15, color=PRIMARY_COLORS['orange'], label='Brownian region (α>3)')
+        ax.set_ylim(ylim)
+        
+        # Statistics
+        n_levy = (treatment_data <= 3).sum()
+        n_brownian = (treatment_data > 3).sum()
+        n_total = len(treatment_data)
+        
+        # Title and labels
+        setup_plot_style(ax,
+                        title=f'{treatment}\nn={n_total}, Lévy={n_levy} ({100*n_levy/n_total:.1f}%), Brownian={n_brownian} ({100*n_brownian/n_total:.1f}%)',
+                        xlabel='α (Power-law exponent)',
+                        ylabel='Density')
+        
+        # Add mean and median lines
+        mean_alpha = treatment_data.mean()
+        median_alpha = treatment_data.median()
+        ax.axvline(x=mean_alpha, color=PRIMARY_COLORS['purple'], linestyle='-', linewidth=1.5,
+                  label=f'Mean α={mean_alpha:.2f}')
+        ax.axvline(x=median_alpha, color=PRIMARY_COLORS['cyan'], linestyle=':', linewidth=1.5,
+                  label=f'Median α={median_alpha:.2f}')
+    
+    # Hide unused subplots
+    for idx in range(n_treatments, len(axes)):
+        axes[idx].axis('off')
+    
+    # Add single legend for all subplots
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(0.5, 0.02),
+              ncol=3, fontsize=9, frameon=True)
+    
+    plt.tight_layout()
+    plot_path = output_dir / 'alpha_distribution_histogram.png'
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"\nAlpha distribution histogram saved to {plot_path}")
+
+
+def create_alpha_comparison_boxplot(per_worm_df, output_dir, target_strain):
+    """Create boxplot comparing α distributions across treatments."""
+    if per_worm_df.empty:
+        return
+    
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    # Order treatments
+    treatment_order = [
+        'Control', 'ETANOL',
+        'CBD 0.3uM', 'CBD 3uM', 'CBD 30uM',
+        'CBDV 0.3uM', 'CBDV 3uM', 'CBDV 30uM',
+        'Total_Extract_CBD'
+    ]
+    present_treatments = [t for t in treatment_order if t in per_worm_df['treatment'].unique()]
+    
+    # Create boxplot
+    box_data = [per_worm_df[per_worm_df['treatment'] == t]['alpha'].dropna() 
+                for t in present_treatments]
+    
+    bp = ax.boxplot(box_data, labels=present_treatments, patch_artist=True)
+    
+    # Color boxes
+    colors = [PRIMARY_COLORS['gray'], PRIMARY_COLORS['yellow'],
+             PRIMARY_COLORS['green'], PRIMARY_COLORS['green'], PRIMARY_COLORS['green'],
+             PRIMARY_COLORS['blue'], PRIMARY_COLORS['blue'], PRIMARY_COLORS['blue'],
+             PRIMARY_COLORS['purple']]
+    
+    for patch, color in zip(bp['boxes'], colors[:len(bp['boxes'])]):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.6)
+    
+    # Add horizontal line at α = 3
+    ax.axhline(y=3, color=PRIMARY_COLORS['red'], linestyle='--', linewidth=2,
+              label='α=3 (Lévy/Brownian threshold)')
+    
+    # Shaded regions
+    xlim = ax.get_xlim()
+    ax.axhspan(1, 3, alpha=0.1, color=PRIMARY_COLORS['green'], label='Lévy region')
+    ax.axhspan(3, ax.get_ylim()[1], alpha=0.1, color=PRIMARY_COLORS['orange'], label='Brownian region')
+    ax.set_xlim(xlim)
+    
+    setup_plot_style(ax,
+                    title=f'Comparison of α (Power-law Exponent) Across Treatments\n{target_strain}',
+                    xlabel='Treatment',
+                    ylabel='α (Power-law exponent)')
+    
+    ax.legend(loc='upper right', fontsize=9)
+    plt.xticks(rotation=45, ha='right')
+    
+    plt.tight_layout()
+    plot_path = output_dir / 'alpha_comparison_boxplot.png'
+    plt.savefig(plot_path, dpi=300, bbox_inches='tight', facecolor='white')
+    plt.close()
+    print(f"Alpha comparison boxplot saved to {plot_path}")
+
 
 # ===========================================================================
 # MAIN EXECUTION
@@ -363,7 +509,11 @@ def main():
                         worm_Rs.append(R_worm)
                         worm_ps.append(p_worm)
 
-                        # Store per-worm result
+                        # Store per-worm result with strict Lévy criterion (Moy et al. 2015)
+                        # Lévy flight: 1 < α ≤ 3, Brownian: α > 3
+                        is_levy_strict = (1 < alpha_worm <= 3)
+                        is_levy_statistical = (R_worm > 0 and p_worm < 0.05)
+                        
                         per_worm_results.append({
                             'strain': target_strain,
                             'treatment': treatment,
@@ -372,7 +522,9 @@ def main():
                             'alpha': alpha_worm,
                             'R': R_worm,
                             'p_value': p_worm,
-                            'is_levy': (R_worm > 0 and p_worm < 0.05)
+                            'is_levy_strict': is_levy_strict,  # Moy et al. criterion: 1 < α ≤ 3
+                            'is_levy_statistical': is_levy_statistical,  # R > 0 and p < 0.05
+                            'classification': 'Lévy' if is_levy_strict else 'Brownian'
                         })
                     except Exception as e:
                         print(f"    Warning: Could not fit worm {track_id}: {e}")
@@ -399,28 +551,58 @@ def main():
                 random_state=42
             )
 
-            # Per-worm statistics
+            # Per-worm statistics with both criteria
             n_worms_tested = len(worm_alphas)
             if n_worms_tested > 0:
-                n_levy_worms = sum(1 for i in range(len(worm_Rs))
-                                  if worm_Rs[i] > 0 and worm_ps[i] < 0.05)
-                percent_levy = (n_levy_worms / n_worms_tested) * 100
+                # Statistical criterion: R > 0 and p < 0.05
+                n_levy_statistical = sum(1 for i in range(len(worm_Rs))
+                                        if worm_Rs[i] > 0 and worm_ps[i] < 0.05)
+                percent_levy_statistical = (n_levy_statistical / n_worms_tested) * 100
+                
+                # Strict criterion (Moy et al.): 1 < α ≤ 3
+                n_levy_strict = sum(1 for a in worm_alphas if 1 < a <= 3)
+                percent_levy_strict = (n_levy_strict / n_worms_tested) * 100
+                
+                # Per-worm alpha statistics
+                alpha_mean_worms = np.mean(worm_alphas)
+                alpha_median_worms = np.median(worm_alphas)
+                alpha_std_worms = np.std(worm_alphas)
+                alpha_min_worms = np.min(worm_alphas)
+                alpha_max_worms = np.max(worm_alphas)
             else:
-                n_levy_worms = 0
-                percent_levy = 0.0
+                n_levy_statistical = 0
+                percent_levy_statistical = 0.0
+                n_levy_strict = 0
+                percent_levy_strict = 0.0
+                alpha_mean_worms = np.nan
+                alpha_median_worms = np.nan
+                alpha_std_worms = np.nan
+                alpha_min_worms = np.nan
+                alpha_max_worms = np.nan
 
             results_summary.append({
                 'treatment': treatment,
-                'alpha': alpha,
+                # Pooled analysis
+                'alpha_pooled': alpha,
                 'alpha_ci_lower': alpha_ci_lower,
                 'alpha_ci_upper': alpha_ci_upper,
                 'xmin': xmin,
                 'loglikelihood_ratio': R,
                 'p_value': p,
+                'n_total_steps': len(all_step_lengths),
+                # Per-worm statistics
                 'n_worms_tested': n_worms_tested,
-                'n_levy_worms': n_levy_worms,
-                'percent_levy_worms': percent_levy,
-                'n_total_steps': len(all_step_lengths)
+                'alpha_mean_worms': alpha_mean_worms,
+                'alpha_median_worms': alpha_median_worms,
+                'alpha_std_worms': alpha_std_worms,
+                'alpha_min_worms': alpha_min_worms,
+                'alpha_max_worms': alpha_max_worms,
+                # Lévy classification (statistical: R>0, p<0.05)
+                'n_levy_statistical': n_levy_statistical,
+                'percent_levy_statistical': percent_levy_statistical,
+                # Lévy classification (strict Moy et al.: 1 < α ≤ 3)
+                'n_levy_strict': n_levy_strict,
+                'percent_levy_strict': percent_levy_strict,
             })
 
             # Store for global FDR correction
@@ -433,7 +615,10 @@ def main():
 
             print(f"  Pooled power-law fit (alpha): {alpha:.3f} [{alpha_ci_lower:.3f}, {alpha_ci_upper:.3f}]")
             print(f"  Log-likelihood ratio vs Lognormal: R={R:.3f}, p-value={p:.3f}")
-            print(f"  Worms showing Lévy pattern: {n_levy_worms}/{n_worms_tested} ({percent_levy:.1f}%)")
+            if n_worms_tested > 0:
+                print(f"  Per-worm α: mean={alpha_mean_worms:.2f}, median={alpha_median_worms:.2f}, std={alpha_std_worms:.2f}")
+                print(f"  Lévy (statistical R>0, p<0.05): {n_levy_statistical}/{n_worms_tested} ({percent_levy_statistical:.1f}%)")
+                print(f"  Lévy (strict 1<α≤3): {n_levy_strict}/{n_worms_tested} ({percent_levy_strict:.1f}%)")
 
             # --- CCDF Plot (Complementary Cumulative Distribution Function) ---
             # This is the standard visualization for Lévy flights (Moy et al. 2015, Figure 9)
@@ -473,12 +658,15 @@ def main():
             legend.get_frame().set_alpha(0.95)
 
             # Add annotation with statistical results
-            annotation_text = (f'{percent_levy:.1f}% worms Lévy-like\n'
-                             f'R = {R:.3f}, p = {p:.3f}\n'
-                             f'α = {alpha:.2f} [{alpha_ci_lower:.2f}, {alpha_ci_upper:.2f}]')
+            levy_class = 'Lévy-like' if alpha <= 3 else 'Brownian'
+            annotation_text = (f'Pooled α = {alpha:.2f} [{alpha_ci_lower:.2f}, {alpha_ci_upper:.2f}]\n'
+                             f'R = {R:.3f}, p = {p:.2e}\n'
+                             f'Classification: {levy_class}\n'
+                             f'Strict Lévy (α≤3): {n_levy_strict}/{n_worms_tested} ({percent_levy_strict:.1f}%)\n'
+                             f'Statistical Lévy: {n_levy_statistical}/{n_worms_tested} ({percent_levy_statistical:.1f}%)')
             ax.text(0.02, 0.02, annotation_text,
                    transform=ax.transAxes, ha='left', va='bottom',
-                   fontsize=9, fontfamily='monospace',
+                   fontsize=8, fontfamily='monospace',
                    bbox=dict(boxstyle='round', facecolor='white',
                            edgecolor='black', alpha=0.9, linewidth=1.5))
 
@@ -514,6 +702,10 @@ def main():
             per_worm_path = output_dir / 'levy_flight_per_worm.csv'
             per_worm_df.to_csv(per_worm_path, index=False)
             print(f"Per-worm results saved to {per_worm_path}")
+            
+            # Create alpha distribution visualizations
+            create_alpha_histogram(per_worm_df, output_dir, target_strain)
+            create_alpha_comparison_boxplot(per_worm_df, output_dir, target_strain)
 
     # Apply global FDR correction across all strains and treatments
     if all_test_results:
