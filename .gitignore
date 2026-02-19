@@ -1,5 +1,7 @@
 # Data files
 *.csv
+*.png
+*.gif
 
 # macOS
 .DS_Store
